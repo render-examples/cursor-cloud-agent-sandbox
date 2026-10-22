@@ -110,7 +110,7 @@ export async function runAgent(
     } catch (error) {
       if (isAmbiguousMutationError(error)) {
         await store.update({
-          ambiguous_mutation: `Cloud Agent creation may have succeeded without returning an ID. Reconcile before retrying: curl -u "$CURSOR_API_KEY:" "\${CURSOR_API_BASE_URL:-https://api.cursor.com}/v1/agents"`,
+          ambiguous_mutation: `Cloud Agent creation may have succeeded without returning an ID. Reconcile before retrying: list recent agents (newest first) with curl -u "$CURSOR_API_KEY:" "\${CURSOR_API_BASE_URL:-https://api.cursor.com}/v1/agents?limit=20", then permanently delete any pool agent created at or after ${store.snapshot().started_at}`,
         });
       }
       throw error;

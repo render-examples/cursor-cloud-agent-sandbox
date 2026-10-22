@@ -198,6 +198,8 @@ describe("provider-native fake lifecycle", () => {
 
     const state = await readState(root);
     expect(String(state.ambiguous_mutation)).toContain("Reconcile before retrying");
+    expect(String(state.ambiguous_mutation)).toContain("/v1/agents?limit=20");
+    expect(String(state.ambiguous_mutation)).toContain(String(state.started_at));
     expect(calls).not.toContain("sandbox:create");
   });
 

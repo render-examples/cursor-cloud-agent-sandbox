@@ -204,8 +204,10 @@ RENDER_WORKSPACE="$RENDER_WORKSPACE_ID" render ea sandboxes stop "$SANDBOX_ID" -
 ```
 
 If Cloud Agent creation fails without a clear answer from the API, the runner
-also prints a `reconcile` command that lists your Cloud Agents, so you can find
-and delete one that may have been created.
+also prints a `reconcile` command. It uses
+[List Agents](https://cursor.com/docs/cloud-agent/api/endpoints.md) to show your
+newest Cloud Agents, along with the run's start time, so you can find and
+permanently delete any agent that may have been created.
 
 ## Troubleshooting
 
