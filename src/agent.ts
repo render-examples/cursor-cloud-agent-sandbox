@@ -391,5 +391,5 @@ function safeErrorMessage(error: unknown): string {
 }
 
 function log(label: string, message: string): void {
-  console.log(`${label.padEnd(14)}${message}`);
+  console.log(`${label.padEnd(13)} ${message}`);
 }

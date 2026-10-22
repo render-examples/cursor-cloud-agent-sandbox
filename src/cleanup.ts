@@ -164,5 +164,5 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 }
 
 function log(label: string, message: string): void {
-  console.log(`${label.padEnd(14)}${message}`);
+  console.log(`${label.padEnd(13)} ${message}`);
 }
