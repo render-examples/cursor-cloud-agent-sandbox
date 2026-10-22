@@ -17,7 +17,8 @@ export interface RunState {
   cursor_claim_state?: "intent" | "claimed" | "connected" | "failed" | "released";
   sandbox_id?: string;
   last_event_id?: string;
-  effective_egress_policy?: string;
+  effective_egress_policy?: string[];
+  ambiguous_mutation?: string;
   cleanup: {
     cursor_agent: CleanupStatus;
     cursor_claim: CleanupStatus;
@@ -124,6 +125,12 @@ export class RunStore {
   }
 }
 
+/**
+ * Matches credential-named keys such as `token`, `sessionToken`, `apiKey`, and
+ * `authorization`, but not counters such as `input_tokens` or `maxTokens`.
+ */
+const CREDENTIAL_KEY = /(token|secret|api_?key|authorization)$/i;
+
 export function redact(value: unknown, secrets: string[]): unknown {
   if (typeof value === "string") return redactString(value, secrets);
   if (Array.isArray(value)) return value.map((item) => redact(item, secrets));
@@ -131,9 +138,7 @@ export function redact(value: unknown, secrets: string[]): unknown {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        /token|secret|api.?key|authorization/i.test(key)
-          ? "[REDACTED]"
-          : redact(item, secrets),
+        CREDENTIAL_KEY.test(key) ? "[REDACTED]" : redact(item, secrets),
       ]),
     );
   }

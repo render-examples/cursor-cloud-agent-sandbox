@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Render } from "@renderinc/sdk";
 import {
   materializeSingleClaimToken,
@@ -223,22 +224,7 @@ export class RenderSandbox {
       if (sandbox.status === "errored" || sandbox.status === "terminated") {
         throw new Error(`Render Sandbox ${sandboxId} is ${sandbox.status}`);
       }
-      await sleep(1_500, signal);
+      await sleep(1_500, undefined, signal ? { signal } : undefined);
     }
   }
-}
-
-async function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) throw signal.reason;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
-  });
 }

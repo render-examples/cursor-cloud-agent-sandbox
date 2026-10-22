@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 export type RunStatus =
   | "CREATING"
   | "RUNNING"
@@ -57,6 +59,9 @@ const TERMINAL = new Set<RunStatus>([
   "EXPIRED",
 ]);
 
+/** Bounds each cleanup request so sandbox termination is never blocked. */
+export const CLEANUP_REQUEST_TIMEOUT_MS = 15_000;
+
 export class CursorApiError extends Error {
   constructor(
     readonly status: number,
@@ -97,11 +102,11 @@ export class CursorClient {
     }
   }
 
-  async createAgent(
-    prompt: string,
-    poolName: string,
-    signal?: AbortSignal,
-  ): Promise<CreatedAgent> {
+  /**
+   * Not abortable: an abandoned request could create a Cloud Agent whose ID is
+   * never recorded and therefore never deleted.
+   */
+  async createAgent(prompt: string, poolName: string): Promise<CreatedAgent> {
     return this.request<CreatedAgent>("/v1/agents", {
       method: "POST",
       body: JSON.stringify({
@@ -109,7 +114,6 @@ export class CursorClient {
         env: { type: "pool", name: poolName },
         mode: "agent",
       }),
-      ...withSignal(signal),
     });
   }
 
@@ -152,7 +156,7 @@ export class CursorClient {
           ),
       );
       if (request) return request;
-      await abortableSleep(1_000, signal);
+      await pause(1_000, signal);
     }
   }
 
@@ -220,7 +224,7 @@ export class CursorClient {
       }
       if (!response.ok) {
         if (response.status >= 500 || response.status === 429) {
-          await abortableSleep(retryDelayMs, options.signal);
+          await pause(retryDelayMs, options.signal);
           retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
           continue;
         }
@@ -265,21 +269,21 @@ export class CursorClient {
       if (sawDone) {
         return this.pollTerminalRun(agentId, runId, options.signal);
       }
-      await abortableSleep(retryDelayMs, options.signal);
+      await pause(retryDelayMs, options.signal);
     }
   }
 
   async cancelRun(agentId: string, runId: string): Promise<void> {
     await this.request(
       `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/cancel`,
-      { method: "POST" },
+      { method: "POST", signal: AbortSignal.timeout(CLEANUP_REQUEST_TIMEOUT_MS) },
     );
   }
 
   async releaseClaim(agentId: string): Promise<void> {
     await this.request(
       `/v0/private-workers/claims/${encodeURIComponent(agentId)}/release`,
-      { method: "POST" },
+      { method: "POST", signal: AbortSignal.timeout(CLEANUP_REQUEST_TIMEOUT_MS) },
     );
   }
 
@@ -289,6 +293,7 @@ export class CursorClient {
       {
         method: "POST",
         body: JSON.stringify({ message: message.slice(0, 500) }),
+        signal: AbortSignal.timeout(CLEANUP_REQUEST_TIMEOUT_MS),
       },
     );
   }
@@ -296,6 +301,7 @@ export class CursorClient {
   async deleteAgent(agentId: string): Promise<void> {
     await this.request(`/v1/agents/${encodeURIComponent(agentId)}`, {
       method: "DELETE",
+      signal: AbortSignal.timeout(CLEANUP_REQUEST_TIMEOUT_MS),
     });
   }
 
@@ -307,7 +313,7 @@ export class CursorClient {
     while (true) {
       const run = await this.getRun(agentId, runId, signal);
       if (TERMINAL.has(run.status)) return { run, source: "get-run" };
-      await abortableSleep(1_000, signal);
+      await pause(1_000, signal);
     }
   }
 
@@ -417,22 +423,8 @@ export function isTerminalStatus(status: RunStatus): boolean {
   return TERMINAL.has(status);
 }
 
-async function abortableSleep(
-  milliseconds: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (signal?.aborted) throw signal.reason;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
-  });
+function pause(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return sleep(milliseconds, undefined, signal ? { signal } : undefined);
 }
 
 function withSignal(signal?: AbortSignal): Pick<RequestInit, "signal"> | object {

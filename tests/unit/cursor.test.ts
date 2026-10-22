@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { CursorClient, parseSse } from "../../src/cursor.js";
 
@@ -59,6 +60,56 @@ describe("Cursor run SSE", () => {
     const firstHeaders = new Headers(fetchMock.mock.calls[0]![1]?.headers);
     expect(firstHeaders.get("Last-Event-ID")).toBe("evt-9");
     expect(firstHeaders.get("Authorization")).toMatch(/^Basic /);
+  });
+});
+
+describe("Cursor polling and cleanup requests", () => {
+  it("does not accumulate abort listeners while polling", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      calls += 1;
+      return Response.json({
+        requests:
+          calls < 3 ? [] : [{ id: "bc-1", labels: [{ key: "pool", value: "sandbox" }] }],
+      });
+    });
+    const client = new CursorClient("key", "https://api.cursor.test", fetchMock);
+    const controller = new AbortController();
+
+    await expect(
+      client.waitForPendingRequest("bc-1", "sandbox", controller.signal),
+    ).resolves.toMatchObject({ id: "bc-1" });
+    expect(calls).toBe(3);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  it("bounds every cleanup request with a timeout signal", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => new Response(null, { status: 204 }));
+    const client = new CursorClient("key", "https://api.cursor.test", fetchMock);
+
+    await client.cancelRun("bc-1", "run-1");
+    await client.releaseClaim("bc-1");
+    await client.failClaim("bc-1", "failed");
+    await client.deleteAgent("bc-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it("does not attach the run signal to Cloud Agent creation", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        agent: { id: "bc-1", latestRunId: "run-1", status: "ACTIVE" },
+        run: { id: "run-1", agentId: "bc-1", status: "CREATING" },
+      }),
+    );
+    const client = new CursorClient("key", "https://api.cursor.test", fetchMock);
+    await client.createAgent("prompt", "sandbox");
+    expect(fetchMock.mock.calls[0]![1]?.signal).toBeUndefined();
   });
 });
 

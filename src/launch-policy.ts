@@ -7,18 +7,26 @@
  * creation. Replace only this module when brokered files become public.
  */
 
-export const REQUIRED_CURSOR_DESTINATIONS = [
+/** Hosts `agent worker` needs while it serves the claimed Cloud Agent. */
+export const RUNTIME_DESTINATIONS = [
   "api2.cursor.sh",
   "api2direct.cursor.sh",
   "agent-stores.s3.us-east-1.amazonaws.com",
   "cloud-agent-artifacts.s3.us-east-1.amazonaws.com",
   "cursor.com",
-  "downloads.cursor.com",
 ] as const;
+
+/**
+ * Hosts used only to download the pinned CLI release. The SDK cannot narrow a
+ * policy after creation, so they stay allowed for this short-lived run.
+ */
+export const INSTALL_DESTINATIONS = ["downloads.cursor.com"] as const;
+
+export const EGRESS_DESTINATIONS = [...RUNTIME_DESTINATIONS, ...INSTALL_DESTINATIONS];
 
 export const PUBLIC_SDK_EGRESS_POLICY = {
   type: "allow-list",
-  rules: REQUIRED_CURSOR_DESTINATIONS.map((domain) => ({
+  rules: EGRESS_DESTINATIONS.map((domain) => ({
     domain,
     protocol: "https" as const,
   })),

@@ -59,4 +59,25 @@ describe("redact", () => {
       nested: { authorization: "[REDACTED]", ordinary: "safe" },
     });
   });
+
+  it("keeps usage counters whose names merely contain 'token'", () => {
+    expect(
+      redact(
+        {
+          usage: { input_tokens: 1200, output_tokens: 340 },
+          maxTokens: 5,
+          tokenizer: "o200k",
+          sessionToken: "claim",
+          apiKey: "key",
+        },
+        [],
+      ),
+    ).toEqual({
+      usage: { input_tokens: 1200, output_tokens: 340 },
+      maxTokens: 5,
+      tokenizer: "o200k",
+      sessionToken: "[REDACTED]",
+      apiKey: "[REDACTED]",
+    });
+  });
 });

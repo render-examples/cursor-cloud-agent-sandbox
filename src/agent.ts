@@ -1,15 +1,16 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { cleanupRun, printManualCleanup } from "./cleanup.js";
 import type { Config } from "./config.js";
 import {
   CursorApiError,
   CursorClient,
-  isTerminalStatus,
   type CursorSseEvent,
   type RunTerminal,
 } from "./cursor.js";
-import { PUBLIC_SDK_EGRESS_POLICY } from "./launch-policy.js";
+import { EGRESS_DESTINATIONS } from "./launch-policy.js";
 import { collectOutputs } from "./outputs.js";
 import { RenderSandbox, type WorkerProcess } from "./render.js";
 import { redact, RunStore } from "./state.js";
@@ -68,13 +69,14 @@ export async function runAgent(
       apiKey: config.renderApiKey,
       workspaceId: config.renderWorkspaceId,
     });
+  const secrets = [config.cursorApiKey, config.renderApiKey];
   const store = await RunStore.create({
     ...(options.dependencies?.runsRoot
       ? { rootDirectory: options.dependencies.runsRoot }
       : {}),
     pool: config.cursorPool,
     timeoutSeconds: config.timeoutSeconds,
-    secretValues: [config.cursorApiKey, config.renderApiKey],
+    secretValues: secrets,
   });
   const workController = new AbortController();
   const onExternalAbort = () =>
@@ -88,68 +90,66 @@ export async function runAgent(
     config.timeoutSeconds * 1_000,
   );
 
-  let claimToken: string | undefined;
   let worker: WorkerProcess | undefined;
   let workerConnected = false;
   let claimFailed = false;
-  let terminalPromise: Promise<RunTerminal> | undefined;
   let primaryError: unknown;
   let result = "";
   let outputFiles: string[] = [];
+  const writeWorkerOutput = (stream: "stdout" | "stderr", data: string) =>
+    writeRedacted(stream, data, secrets);
 
   try {
     await cursor.assertAnyRepoPool(config.cursorPool, workController.signal);
     log("preflight", "passed");
 
+    await store.update({ phase: "agent", cleanup: { cursor_agent: "pending" } });
+    let created;
+    try {
+      created = await cursor.createAgent(prompt, config.cursorPool);
+    } catch (error) {
+      if (isAmbiguousMutationError(error)) {
+        await store.update({
+          ambiguous_mutation: `Cloud Agent creation may have succeeded without returning an ID. Reconcile before retrying: curl -u "$CURSOR_API_KEY:" "\${CURSOR_API_BASE_URL:-https://api.cursor.com}/v1/agents"`,
+        });
+      }
+      throw error;
+    }
     await store.update({
-      phase: "cursor-agent-create-intent",
-      cleanup: { cursor_agent: "pending" },
-    });
-    const created = await cursor.createAgent(
-      prompt,
-      config.cursorPool,
-      workController.signal,
-    );
-    await store.update({
-      phase: "cursor-agent-created",
       cursor_agent_id: created.agent.id,
       cursor_run_id: created.run.id,
     });
     log("agent", created.agent.id);
+    workController.signal.throwIfAborted();
 
-    terminalPromise = cursor.waitForRunTerminal(
+    const terminalPromise = cursor.waitForRunTerminal(
       created.agent.id,
       created.run.id,
       {
         signal: workController.signal,
         onEvent: async (event) => {
           await recordCursorEvent(store, event);
-          printCursorEvent(event, [
-            config.cursorApiKey,
-            config.renderApiKey,
-            ...(claimToken ? [claimToken] : []),
-          ]);
+          printCursorEvent(event, secrets);
         },
       },
     );
     void terminalPromise.catch(() => undefined);
+    const endedBefore = (milestone: string) =>
+      terminalPromise.then((terminal): never => {
+        throw new Error(`Cursor run ended with ${terminal.run.status} before ${milestone}`);
+      });
 
-    const prematureTerminal = terminalPromise.then((terminal) => {
-      throw new Error(
-        `Cursor run ended with ${terminal.run.status} before its pool request was claimed`,
-      );
-    });
     const pending = await Promise.race([
       cursor.waitForPendingRequest(
         created.agent.id,
         config.cursorPool,
         workController.signal,
       ),
-      prematureTerminal,
+      endedBefore("its pool request was claimed"),
     ]);
     const workerId = stableWorkerId(store.snapshot().run_id);
     await store.update({
-      phase: "cursor-claim-intent",
+      phase: "claim",
       cursor_worker_id: workerId,
       cursor_claim_state: "intent",
       cleanup: { cursor_claim: "pending" },
@@ -159,17 +159,14 @@ export async function runAgent(
       workerId,
       workController.signal,
     );
-    claimToken = claim.token;
-    store.addSecret(claimToken);
-    await store.update({
-      phase: "cursor-claimed",
-      cursor_claim_state: "claimed",
-    });
+    secrets.push(claim.token);
+    store.addSecret(claim.token);
+    await store.update({ cursor_claim_state: "claimed" });
     log("claim", `${claim.id} → ${workerId}`);
 
     await store.update({
-      phase: "sandbox-create-intent",
-      effective_egress_policy: JSON.stringify(PUBLIC_SDK_EGRESS_POLICY),
+      phase: "provision",
+      effective_egress_policy: [...EGRESS_DESTINATIONS],
       cleanup: { sandbox: "pending" },
     });
     const sandboxId = await sandbox.create(
@@ -179,7 +176,7 @@ export async function runAgent(
         timeoutSeconds: Math.min(config.timeoutSeconds + 180, 86_400),
       },
       async (id) => {
-        await store.update({ phase: "sandbox-creating", sandbox_id: id });
+        await store.update({ sandbox_id: id });
         log("provision", id);
       },
       workController.signal,
@@ -191,29 +188,19 @@ export async function runAgent(
         path.dirname(fileURLToPath(import.meta.url)),
         "../scripts/install-executor.sh",
       );
-    await store.update({ phase: "installing-worker" });
+    await store.update({ phase: "install" });
     await sandbox.installCursorCli(
       sandboxId,
       installScriptPath,
-      (stream, data) =>
-        writeRedacted(stream, data, [
-          config.cursorApiKey,
-          config.renderApiKey,
-          claimToken!,
-        ]),
+      writeWorkerOutput,
       workController.signal,
     );
 
-    await sandbox.putClaimToken(sandboxId, claimToken);
-    await store.update({ phase: "starting-worker" });
+    await sandbox.putClaimToken(sandboxId, claim.token);
+    await store.update({ phase: "worker" });
     worker = sandbox.startWorker(sandboxId, {
       signal: workController.signal,
-      onOutput: (stream, data) =>
-        writeRedacted(stream, data, [
-          config.cursorApiKey,
-          config.renderApiKey,
-          claimToken!,
-        ]),
+      onOutput: writeWorkerOutput,
     });
     const fatalWorker = worker.completion.then((exitCode) => {
       if (exitCode !== 0) {
@@ -221,6 +208,7 @@ export async function runAgent(
       }
       return new Promise<never>(() => undefined);
     });
+    void fatalWorker.catch(() => undefined);
 
     await waitForWorkerReady({
       cursor,
@@ -230,25 +218,18 @@ export async function runAgent(
       agentId: created.agent.id,
       signal: workController.signal,
       fatalWorker,
-      prematureTerminal: terminalPromise.then((terminal) => {
-        throw new Error(
-          `Cursor run ended with ${terminal.run.status} before the worker became ready`,
-        );
-      }),
+      prematureTerminal: endedBefore("the worker became ready"),
     });
     workerConnected = true;
-    await store.update({
-      phase: "worker-connected",
-      cursor_claim_state: "connected",
-    });
+    await store.update({ cursor_claim_state: "connected" });
     log("worker", "connected");
 
     await store.update({ phase: "run" });
-    const terminal = await Promise.race([terminalPromise, fatalWorker]);
+    const terminal: RunTerminal = await Promise.race([terminalPromise, fatalWorker]);
     result = terminal.run.result ?? "";
     await store.writeResult(result);
-    log("result", `${terminal.run.status} (${terminal.source})`);
     if (result) log("agent", result);
+    log("result", `${terminal.run.status} (${terminal.source})`);
     if (terminal.run.status !== "FINISHED") {
       throw new Error(`Cursor run ended with ${terminal.run.status}`);
     }
@@ -259,11 +240,7 @@ export async function runAgent(
       sandbox,
       sandboxId,
       destination,
-      forbiddenValues: [
-        config.cursorApiKey,
-        config.renderApiKey,
-        claimToken,
-      ],
+      forbiddenValues: secrets,
       signal: workController.signal,
     });
     log(
@@ -271,7 +248,7 @@ export async function runAgent(
       `copied ${outputFiles.length} file${outputFiles.length === 1 ? "" : "s"} to ${destination}`,
     );
   } catch (error) {
-    primaryError = error;
+    primaryError = workController.signal.aborted ? workController.signal.reason : error;
     workController.abort(error);
     const snapshot = store.snapshot();
     if (
@@ -282,7 +259,7 @@ export async function runAgent(
       try {
         await cursor.failClaim(
           snapshot.cursor_agent_id,
-          `Render Sandbox worker failed to start: ${safeErrorMessage(error)}`,
+          `Render Sandbox worker failed to start: ${safeErrorMessage(primaryError)}`,
         );
         claimFailed = true;
         await store.update({
@@ -296,20 +273,24 @@ export async function runAgent(
   } finally {
     clearTimeout(deadlineTimer);
     options.signal?.removeEventListener("abort", onExternalAbort);
-    const cleanupErrors = await cleanup({
+    await store.update({ phase: "cleanup" });
+    const cleanupErrors = await cleanupRun({
       cursor,
       sandbox,
       store,
       ...(worker ? { worker } : {}),
       claimFailed,
     });
+    const { ambiguous_mutation: ambiguousMutation } = store.snapshot();
+    if (ambiguousMutation) console.error(`reconcile     ${ambiguousMutation}`);
     if (cleanupErrors.length > 0) {
       printManualCleanup(store.snapshot());
-      if (!primaryError) {
-        primaryError = new Error(
-          `Cleanup incomplete: ${cleanupErrors.map(safeErrorMessage).join("; ")}`,
-        );
-      }
+      const cleanupError = new Error(
+        `Cleanup incomplete: ${cleanupErrors.map(safeErrorMessage).join("; ")}`,
+      );
+      primaryError = primaryError
+        ? new AggregateError([primaryError, cleanupError], "Run failed and cleanup was incomplete")
+        : cleanupError;
     }
   }
 
@@ -327,145 +308,39 @@ async function waitForWorkerReady(options: {
   fatalWorker: Promise<never>;
   prematureTerminal: Promise<never>;
 }): Promise<void> {
-  while (true) {
-    options.signal.throwIfAborted();
-    const readiness = (async () => {
-      const sandboxReady = await options.sandbox.isWorkerReady(
-        options.sandboxId,
-        options.signal,
+  const isReady = async (): Promise<boolean> => {
+    if (!(await options.sandbox.isWorkerReady(options.sandboxId, options.signal))) {
+      return false;
+    }
+    try {
+      const worker = await options.cursor.getWorker(options.workerId, options.signal);
+      return (
+        worker.workerId === options.workerId &&
+        worker.activeBcId === options.agentId &&
+        worker.isInUse
       );
-      let cursorReady = false;
-      try {
-        const worker = await options.cursor.getWorker(
-          options.workerId,
-          options.signal,
-        );
-        cursorReady =
-          worker.workerId === options.workerId &&
-          worker.activeBcId === options.agentId &&
-          worker.isInUse;
-      } catch (error) {
-        if (!(error instanceof CursorApiError) || error.status !== 404) throw error;
-      }
-      return sandboxReady && cursorReady;
-    })();
-    if (
-      await Promise.race([
-        readiness,
-        options.fatalWorker,
-        options.prematureTerminal,
-      ])
-    ) {
-      return;
-    }
-    await sleep(1_000, options.signal);
-  }
-}
-
-async function cleanup(options: {
-  cursor: CursorOperations;
-  sandbox: SandboxOperations;
-  store: RunStore;
-  worker?: WorkerProcess;
-  claimFailed: boolean;
-}): Promise<unknown[]> {
-  const errors: unknown[] = [];
-  const state = options.store.snapshot();
-
-  if (state.cursor_agent_id && state.cursor_run_id) {
-    try {
-      const run = await options.cursor.getRun(
-        state.cursor_agent_id,
-        state.cursor_run_id,
-      );
-      if (!isTerminalStatus(run.status)) {
-        try {
-          await options.cursor.cancelRun(
-            state.cursor_agent_id,
-            state.cursor_run_id,
-          );
-        } catch (error) {
-          if (
-            !(error instanceof CursorApiError) ||
-            !(error.status === 409 && error.code === "run_not_cancellable")
-          ) {
-            throw error;
-          }
-        }
-      }
     } catch (error) {
-      errors.push(error);
-    }
-  }
-
-  if (
-    state.cursor_agent_id &&
-    state.cleanup.cursor_claim !== "not-created" &&
-    !options.claimFailed
-  ) {
-    try {
-      await releaseClaimWithRetry(options.cursor, state.cursor_agent_id);
-      await options.store.update({
-        cursor_claim_state: "released",
-        cleanup: { cursor_claim: "complete" },
-      });
-    } catch (error) {
-      errors.push(error);
-      await options.store.update({ cleanup: { cursor_claim: "failed" } });
-    }
-  }
-
-  if (state.cursor_agent_id) {
-    try {
-      await options.cursor.deleteAgent(state.cursor_agent_id);
-      await options.store.update({
-        cleanup: { cursor_agent: "complete" },
-      });
-    } catch (error) {
-      errors.push(error);
-      await options.store.update({ cleanup: { cursor_agent: "failed" } });
-    }
-  }
-
-  options.worker?.stop();
-
-  if (state.sandbox_id) {
-    try {
-      await options.sandbox.terminate(state.sandbox_id);
-      await options.store.update({ cleanup: { sandbox: "complete" } });
-    } catch (error) {
-      errors.push(error);
-      await options.store.update({ cleanup: { sandbox: "failed" } });
-    }
-  }
-
-  await options.store.update({ phase: errors.length === 0 ? "complete" : "cleanup-failed" });
-  log(
-    "cleanup",
-    errors.length === 0
-      ? "Cloud Agent deleted; claim released; sandbox terminated; Team Pool retained"
-      : `incomplete (${errors.length} error${errors.length === 1 ? "" : "s"})`,
-  );
-  return errors;
-}
-
-async function releaseClaimWithRetry(
-  cursor: CursorOperations,
-  agentId: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      await cursor.releaseClaim(agentId);
-      return;
-    } catch (error) {
-      if (error instanceof CursorApiError && error.status === 404) return;
-      if (error instanceof CursorApiError && error.status === 400 && attempt < 4) {
-        await sleep(1_000);
-        continue;
-      }
+      if (error instanceof CursorApiError && error.status === 404) return false;
       throw error;
     }
+  };
+
+  while (true) {
+    options.signal.throwIfAborted();
+    if (await Promise.race([isReady(), options.fatalWorker, options.prematureTerminal])) {
+      return;
+    }
+    await sleep(1_000, undefined, { signal: options.signal });
   }
+}
+
+/**
+ * True when a failed mutation may still have taken effect on the server, so its
+ * resource must be reconciled before retrying.
+ */
+function isAmbiguousMutationError(error: unknown): boolean {
+  if (!(error instanceof CursorApiError)) return true;
+  return error.status === 408 || error.status === 409 || error.status === 429 || error.status >= 500;
 }
 
 async function recordCursorEvent(
@@ -515,43 +390,6 @@ function safeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function printManualCleanup(state: ReturnType<RunStore["snapshot"]>): void {
-  console.error("Manual cleanup commands:");
-  if (state.cursor_run_id && state.cursor_agent_id) {
-    console.error(
-      `curl -u "$CURSOR_API_KEY:" -X POST "\${CURSOR_API_BASE_URL:-https://api.cursor.com}/v1/agents/${state.cursor_agent_id}/runs/${state.cursor_run_id}/cancel"`,
-    );
-  }
-  if (state.cursor_agent_id) {
-    console.error(
-      `curl -u "$CURSOR_API_KEY:" -X POST "\${CURSOR_API_BASE_URL:-https://api.cursor.com}/v0/private-workers/claims/${state.cursor_agent_id}/release"`,
-    );
-    console.error(
-      `curl -u "$CURSOR_API_KEY:" -X DELETE "\${CURSOR_API_BASE_URL:-https://api.cursor.com}/v1/agents/${state.cursor_agent_id}"`,
-    );
-  }
-  if (state.sandbox_id) {
-    console.error(
-      `RENDER_WORKSPACE="$RENDER_WORKSPACE_ID" render ea sandboxes stop ${state.sandbox_id} --confirm`,
-    );
-  }
-}
-
 function log(label: string, message: string): void {
   console.log(`${label.padEnd(14)}${message}`);
-}
-
-async function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) throw signal.reason;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
-  });
 }
