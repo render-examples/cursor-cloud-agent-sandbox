@@ -10,7 +10,6 @@ copied back to your machine.
 
 Follow the tutorial:
 [Run Cursor Cloud Agents on Render Sandboxes](https://render.com/docs/sandboxes/hosted-agents/cursor).
-Its source is [`docs/tutorial.md`](docs/tutorial.md).
 
 ## Quickstart
 
