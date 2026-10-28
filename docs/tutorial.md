@@ -1,4 +1,4 @@
-# Build a coding agent with Cursor Cloud Agents and Render Sandboxes
+# Run Cursor Cloud Agents on Render Sandboxes
 
 > **Note:** Render Sandboxes is in early access. Cursor Self-Hosted Machines
 > and Team Pools are Cursor Enterprise features that a team administrator must
@@ -242,6 +242,6 @@ Cloud Agent, and terminate the sandbox, but not the shared Team Pool.
 
 - [Cursor Team Pools documentation](https://cursor.com/docs/cloud-agent/self-hosted/pool.md)
 - [Render Sandboxes documentation](https://render.com/docs/sandboxes)
-- [Build a coding agent with OpenAI Agents API and Render Sandboxes](https://render.com/docs/sandboxes/hosted-agents/openai)
-- [Build a coding agent with Claude Managed Agents and Render Sandboxes](https://render.com/docs/sandboxes/hosted-agents/claude-managed-agents)
+- [Run the OpenAI Agents API on Render Sandboxes](https://render.com/docs/sandboxes/hosted-agents/openai)
+- [Run Claude Managed Agents on Render Sandboxes](https://render.com/docs/sandboxes/hosted-agents/claude-managed-agents)
 - [Template source](https://github.com/render-examples/cursor-cloud-agent-sandbox)
