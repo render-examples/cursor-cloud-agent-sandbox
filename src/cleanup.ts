@@ -146,7 +146,7 @@ export function printManualCleanup(state: Readonly<RunState>): void {
   }
   if (state.sandbox_id) {
     console.error(
-      `RENDER_WORKSPACE="$RENDER_WORKSPACE_ID" render ea sandboxes stop ${state.sandbox_id} --confirm`,
+      `RENDER_WORKSPACE="$RENDER_WORKSPACE_ID" render sandboxes stop ${state.sandbox_id} --confirm`,
     );
   }
 }

@@ -9,7 +9,7 @@ copied back to your machine.
 > Pools require Cursor Enterprise and team-admin enablement.
 
 Follow the tutorial:
-[Run Cursor Cloud Agents on Render Sandboxes](https://render.com/docs/sandboxes/hosted-agents/cursor).
+[Run Cursor Cloud Agents on Render Sandboxes](https://render.com/docs/sandboxes-cursor-cloud-agents).
 
 ## Quickstart
 
